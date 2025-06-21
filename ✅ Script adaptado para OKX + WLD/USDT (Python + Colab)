@@ -1,0 +1,99 @@
+import requests
+import time
+import pandas as pd
+from datetime import datetime
+
+# --- Configuración ---
+OKX_SYMBOL = "WLD-USDT"
+DEPTH_LIMIT = 10
+INTERVAL_SEC = 2
+DURATION_SEC = 40  # por ciclo
+
+# --- Obtener libro de órdenes desde OKX ---
+def get_order_book_okx(inst_id=OKX_SYMBOL, depth=DEPTH_LIMIT):
+    url = "https://www.okx.com/api/v5/market/books"
+    params = {
+        "instId": inst_id,
+        "sz": depth
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=5)
+        data = response.json()
+        if data["code"] != "0":
+            print(f"[ERROR] OKX API error: {data['msg']}")
+            return None
+        return data["data"][0]
+    except Exception as e:
+        print(f"[EXCEPTION] {e}")
+        return None
+
+# --- Extraer top N por volumen ---
+def extract_top_volume_orders(orders, top_n=1):
+    df = pd.DataFrame(orders, columns=["price", "volume", "_"])
+    df["price"] = df["price"].astype(float)
+    df["volume"] = df["volume"].astype(float)
+    df_sorted = df.sort_values(by="volume", ascending=False).head(top_n)
+    return df_sorted[["price", "volume"]]
+
+# --- Captura cíclica de datos del libro de órdenes ---
+def capture_cycle_data(inst_id=OKX_SYMBOL, interval_sec=2, duration_sec=40):
+    captured_asks = []
+    captured_bids = []
+
+    start_time = time.time()
+    while time.time() - start_time < duration_sec:
+        book = get_order_book_okx(inst_id)
+        if book:
+            top_asks = extract_top_volume_orders(book["asks"])
+            top_bids = extract_top_volume_orders(book["bids"])
+            captured_asks.append(top_asks)
+            captured_bids.append(top_bids)
+        time.sleep(interval_sec)
+
+    df_asks = pd.concat(captured_asks, ignore_index=True)
+    df_bids = pd.concat(captured_bids, ignore_index=True)
+    return df_asks, df_bids
+
+# --- Agrupación y resumen por precio con volumen acumulado ---
+def summarize_volume(df, label):
+    summary = df.groupby("price").agg(total_volume=("volume", "sum"))
+    summary_sorted = summary.sort_values(by="total_volume", ascending=False).reset_index()
+    summary_sorted.columns = [f"{label}_price", f"{label}_volume"]
+    return summary_sorted
+
+# --- Ejecución principal ---
+cycle_results_asks = []
+cycle_results_bids = []
+
+print("Iniciando ciclo de captura de datos de OKX...")
+
+try:
+    while True:
+        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{timestamp}] Capturando libro de órdenes...")
+
+        df_asks, df_bids = capture_cycle_data()
+
+        cycle_results_asks.append(df_asks)
+        cycle_results_bids.append(df_bids)
+
+        print(f"[{timestamp}] Ciclo completado. Esperando 2 minutos para el siguiente...")
+        time.sleep(120)
+
+except KeyboardInterrupt:
+    print("\nFinalizando captura. Procesando resultados...")
+
+    all_asks = pd.concat(cycle_results_asks, ignore_index=True)
+    all_bids = pd.concat(cycle_results_bids, ignore_index=True)
+
+    asks_summary = summarize_volume(all_asks, "ask")
+    bids_summary = summarize_volume(all_bids, "bid")
+
+    final_result = pd.concat([asks_summary, bids_summary], axis=1)
+
+    print("\nResumen final de precios con mayor volumen:")
+    print(final_result.head(10))
+
+    # Opcional: guardar
+    final_result.to_csv("resumen_ordenes_okx.csv", index=False)
